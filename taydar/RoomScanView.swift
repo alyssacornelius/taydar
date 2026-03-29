@@ -10,18 +10,58 @@ import RoomPlan
 
 struct RoomScanView: View {
     @Environment(\.dismiss) private var dismiss
+    @State private var isFinishing = false
+    @State private var reviewDraft: ScanDraft?
+    @State private var reviewError: String?
 
     var body: some View {
-        ZStack(alignment: .top) {
-            RoomCaptureContainer()
+        ZStack {
+            RoomCaptureContainer(
+                isFinishing: isFinishing,
+                onReviewReady: { draft in
+                    isFinishing = false
+                    reviewDraft = draft
+                },
+                onError: { error in
+                    isFinishing = false
+                    reviewError = error
+                }
+            )
                 .ignoresSafeArea()
 
-            scanHeader(
-                title: "Room",
-                subtitle: "Move slowly around the space so walls, openings, and furniture can be reconstructed."
-            )
+            VStack(spacing: 0) {
+                scanHeader(
+                    title: "Room",
+                    subtitle: "Move slowly around the space so walls, openings, and furniture can be reconstructed."
+                )
+
+                Spacer()
+
+                footer
+            }
         }
         .preferredColorScheme(.dark)
+        .fullScreenCover(item: $reviewDraft) { draft in
+            ScanReviewView(
+                draft: draft,
+                saveAction: { name in
+                    do {
+                        _ = try ScanLibrary.saveDraft(draft, name: name)
+                        dismiss()
+                    } catch {
+                        reviewError = error.localizedDescription
+                    }
+                },
+                cancelAction: {
+                    do {
+                        try ScanLibrary.discardDraft(at: draft.directory)
+                        dismiss()
+                    } catch {
+                        reviewError = error.localizedDescription
+                    }
+                }
+            )
+        }
     }
 
     private func scanHeader(title: String, subtitle: String) -> some View {
@@ -58,10 +98,57 @@ struct RoomScanView: View {
         .padding(.horizontal, 20)
         .padding(.top, 18)
     }
+
+    private var footer: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if let reviewError {
+                Text(reviewError)
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.red.opacity(0.92))
+            }
+
+            HStack(spacing: 12) {
+                Button {
+                    dismiss()
+                } label: {
+                    Text("Cancel")
+                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+                        .background(.white.opacity(0.14))
+                        .clipShape(Capsule())
+                }
+
+                Button {
+                    isFinishing = true
+                } label: {
+                    Text(isFinishing ? "Finishing" : "Finish Scan")
+                        .font(.system(size: 16, weight: .bold, design: .rounded))
+                        .foregroundStyle(.black)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 18)
+                        .background(Color.white)
+                        .clipShape(Capsule())
+                }
+                .disabled(isFinishing)
+                .opacity(isFinishing ? 0.55 : 1)
+            }
+        }
+        .padding(20)
+        .background(.black.opacity(0.54))
+        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .padding(.horizontal, 20)
+        .padding(.bottom, 28)
+    }
 }
 private struct RoomCaptureContainer: UIViewRepresentable {
+    let isFinishing: Bool
+    let onReviewReady: (ScanDraft) -> Void
+    let onError: (String) -> Void
+
     func makeCoordinator() -> Coordinator {
-        Coordinator()
+        Coordinator(onReviewReady: onReviewReady, onError: onError)
     }
 
     func makeUIView(context: Context) -> UIView {
@@ -85,7 +172,12 @@ private struct RoomCaptureContainer: UIViewRepresentable {
         return containerView
     }
 
-    func updateUIView(_ uiView: UIView, context: Context) {}
+    func updateUIView(_ uiView: UIView, context: Context) {
+        if isFinishing, let captureView = context.coordinator.captureView, !context.coordinator.didRequestStop {
+            context.coordinator.didRequestStop = true
+            captureView.captureSession.stop()
+        }
+    }
 
     static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
         coordinator.captureView?.captureSession.stop()
@@ -96,5 +188,56 @@ private struct RoomCaptureContainer: UIViewRepresentable {
 
     final class Coordinator: NSObject, RoomCaptureSessionDelegate {
         weak var captureView: RoomCaptureView?
+        let onReviewReady: (ScanDraft) -> Void
+        let onError: (String) -> Void
+        var didRequestStop = false
+
+        init(
+            onReviewReady: @escaping (ScanDraft) -> Void,
+            onError: @escaping (String) -> Void
+        ) {
+            self.onReviewReady = onReviewReady
+            self.onError = onError
+        }
+
+        func captureSession(
+            _ session: RoomCaptureSession,
+            didEndWith data: CapturedRoomData,
+            error: (any Error)?
+        ) {
+            if let error {
+                DispatchQueue.main.async {
+                    self.onError(error.localizedDescription)
+                }
+                return
+            }
+
+            Task {
+                do {
+                    let builder = RoomBuilder(options: [])
+                    let capturedRoom = try await builder.capturedRoom(from: data)
+                    let directory = try ScanLibrary.createDraftDirectory(for: .room, mode: .ar)
+                    let modelURL = directory.appendingPathComponent("room.usdz")
+                    try capturedRoom.export(to: modelURL, exportOptions: .mesh)
+
+                    let draft = ScanDraft(
+                        directory: directory,
+                        kind: .room,
+                        mode: .ar,
+                        createdAt: Date(),
+                        modelFileURL: modelURL,
+                        imageFileURLs: []
+                    )
+
+                    await MainActor.run {
+                        self.onReviewReady(draft)
+                    }
+                } catch {
+                    await MainActor.run {
+                        self.onError(error.localizedDescription)
+                    }
+                }
+            }
+        }
     }
 }

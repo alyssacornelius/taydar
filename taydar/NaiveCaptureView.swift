@@ -11,6 +11,8 @@ import SwiftUI
 struct NaiveCaptureView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var camera = NaiveCaptureCamera()
+    @State private var reviewDraft: ScanDraft?
+    @State private var reviewError: String?
 
     let scanKind: NaiveCaptureKind
 
@@ -40,6 +42,13 @@ struct NaiveCaptureView: View {
         .onDisappear {
             camera.stopSession()
         }
+        .fullScreenCover(item: $reviewDraft) { draft in
+            ScanReviewView(
+                draft: draft,
+                saveAction: handleSaveReview,
+                cancelAction: handleCancelReview
+            )
+        }
     }
 
     private var header: some View {
@@ -57,6 +66,8 @@ struct NaiveCaptureView: View {
                 }
 
                 Spacer()
+
+                YoloModeBadge(title: "YOLO mode")
             }
 
             VStack(alignment: .leading, spacing: 8) {
@@ -118,11 +129,17 @@ struct NaiveCaptureView: View {
                         .foregroundStyle(.red.opacity(0.92))
                 }
 
+                if let reviewError {
+                    Text(reviewError)
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.red.opacity(0.92))
+                }
+
                 HStack(spacing: 12) {
                     Button {
-                        dismiss()
+                        handleSecondaryAction()
                     } label: {
-                        Text(camera.shotCount > 0 ? "Done" : "Cancel")
+                        Text(camera.shotCount > 0 ? "Review" : "Cancel")
                             .font(.system(size: 15, weight: .bold, design: .rounded))
                             .foregroundStyle(.white)
                             .frame(maxWidth: .infinity)
@@ -154,14 +171,43 @@ struct NaiveCaptureView: View {
         }
     }
 
+    private func handleSecondaryAction() {
+        guard camera.hasCapturedImages else {
+            dismiss()
+            return
+        }
+
+        camera.stopSession()
+        reviewDraft = camera.makeReviewDraft()
+        reviewError = reviewDraft == nil ? "Could not prepare the captured frames for review." : nil
+    }
+
+    private func handleSaveReview(name: String) {
+        do {
+            _ = try camera.saveReviewDraft(named: name)
+            dismiss()
+        } catch {
+            reviewError = error.localizedDescription
+        }
+    }
+
+    private func handleCancelReview() {
+        do {
+            try camera.discardReviewDraft()
+            dismiss()
+        } catch {
+            reviewError = error.localizedDescription
+        }
+    }
+
     private var headerSubtitle: String {
         switch scanKind {
         case .room:
-            return "RoomPlan is unavailable here, so this fallback stores plain camera frames " +
-                "for later NN training or inference."
+            return "AR room scanning is unavailable here, so this mode captures plain camera " +
+                "frames for ML-based 3D mesh reconstruction from 2D imagery."
         case .object:
-            return "Object Capture is unavailable here, so this fallback stores plain camera frames " +
-                "for later NN training or inference."
+            return "AR object scanning is unavailable here, so this mode captures plain camera " +
+                "frames for ML-based 3D mesh reconstruction from 2D imagery."
         }
     }
 

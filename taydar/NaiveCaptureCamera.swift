@@ -22,14 +22,23 @@ enum NaiveCaptureKind: String {
             return "Object"
         }
     }
+
+    var scanKind: ScanKind {
+        switch self {
+        case .room:
+            return .room
+        case .object:
+            return .object
+        }
+    }
 }
 
 final class NaiveCaptureCamera: NSObject, ObservableObject {
     @Published private(set) var authorizationStatus: AVAuthorizationStatus =
         AVCaptureDevice.authorizationStatus(for: .video)
     @Published private(set) var shotCount = 0
-    @Published private(set) var statusTitle = "Preparing"
-    @Published private(set) var statusMessage = "Setting up the fallback camera."
+    @Published private(set) var statusTitle = "YOLO Ready"
+    @Published private(set) var statusMessage = "Setting up naive camera capture for ML fallback."
     @Published private(set) var errorMessage: String?
     @Published private(set) var scanFolderName: String?
 
@@ -69,8 +78,8 @@ final class NaiveCaptureCamera: NSObject, ObservableObject {
             statusTitle = "Camera Blocked"
             statusMessage = "Enable camera access in Settings to collect fallback image data."
         @unknown default:
-            statusTitle = "Preparing"
-            statusMessage = "Setting up the fallback camera."
+            statusTitle = "YOLO Ready"
+            statusMessage = "Setting up naive camera capture for ML fallback."
         }
     }
 
@@ -82,6 +91,10 @@ final class NaiveCaptureCamera: NSObject, ObservableObject {
         shotCount == 0 ? "Capture Frame" : "Capture Another"
     }
 
+    var hasCapturedImages: Bool {
+        shotCount > 0
+    }
+
     func capturePhoto() {
         guard canCapture else {
             return
@@ -91,7 +104,7 @@ final class NaiveCaptureCamera: NSObject, ObservableObject {
         settings.flashMode = .off
         photoOutput.capturePhoto(with: settings, delegate: self)
         statusTitle = "Capturing"
-        statusMessage = "Writing a plain camera frame for later model input."
+        statusMessage = "Writing a naive 2D frame for the ML reconstruction pipeline."
     }
 
     func stopSession() {
@@ -163,14 +176,14 @@ final class NaiveCaptureCamera: NSObject, ObservableObject {
         switch activeKind {
         case .room:
             return shots == 0
-                ? "Walk the room and capture broad views that cover walls, openings, and furniture."
-                : "Keep moving through the space and capture more overlap for the eventual NN input."
+                ? "Walk the room and capture broad overlapping views of walls, openings, and furniture."
+                : "Keep moving through the space and add overlap so the ML path has enough 2D coverage."
         case .object:
             return shots == 0
                 ? "Center the object and start with a clean front view."
-                : "Circle the object and vary angles so the eventual NN sees every side."
+                : "Circle the object and vary angles so the ML path can infer more of the shape."
         case .none:
-            return "Capture plain camera frames for later NN input."
+            return "Capture plain camera frames for later ML reconstruction."
         }
     }
 
@@ -192,7 +205,17 @@ final class NaiveCaptureCamera: NSObject, ObservableObject {
 
         if captureSession.canAddOutput(photoOutput) {
             captureSession.addOutput(photoOutput)
-            photoOutput.isHighResolutionCaptureEnabled = true
+            if #available(iOS 16.0, *) {
+                if let maxDimensions = device.activeFormat.supportedMaxPhotoDimensions.max(
+                    by: { lhs, rhs in
+                        lhs.width * lhs.height < rhs.width * rhs.height
+                    }
+                ) {
+                    photoOutput.maxPhotoDimensions = maxDimensions
+                }
+            } else {
+                photoOutput.isHighResolutionCaptureEnabled = true
+            }
         } else {
             throw NaiveCaptureError.cannotAddOutput
         }
@@ -201,7 +224,7 @@ final class NaiveCaptureCamera: NSObject, ObservableObject {
     private func handleConfigurationSuccess() {
         DispatchQueue.main.async {
             self.isConfigured = true
-            self.statusTitle = "Ready"
+            self.statusTitle = "YOLO Ready"
             self.statusMessage = self.instructions(forShots: self.shotCount)
         }
         startSession()
@@ -249,6 +272,58 @@ final class NaiveCaptureCamera: NSObject, ObservableObject {
         errorMessage = nil
         statusTitle = "Saved"
         statusMessage = instructions(forShots: shotCount)
+    }
+
+    @MainActor
+    func makeReviewDraft() -> ScanDraft? {
+        guard let scanDirectory, let activeKind else {
+            return nil
+        }
+
+        let contents = try? FileManager.default.contentsOfDirectory(
+            at: scanDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )
+        let imageURLs = (contents ?? [])
+            .filter { $0.pathExtension.lowercased() == "jpg" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+
+        guard !imageURLs.isEmpty else {
+            return nil
+        }
+
+        return ScanDraft(
+            directory: scanDirectory,
+            kind: activeKind.scanKind,
+            mode: .yolo,
+            createdAt: creationDate(for: scanDirectory),
+            modelFileURL: nil,
+            imageFileURLs: imageURLs
+        )
+    }
+
+    @MainActor
+    func saveReviewDraft(named name: String) throws -> SavedScan {
+        guard let draft = makeReviewDraft() else {
+            throw NaiveCaptureError.noDraftToSave
+        }
+
+        return try ScanLibrary.saveDraft(draft, name: name)
+    }
+
+    @MainActor
+    func discardReviewDraft() throws {
+        guard let scanDirectory else {
+            return
+        }
+
+        try ScanLibrary.discardDraft(at: scanDirectory)
+    }
+
+    private func creationDate(for directory: URL) -> Date {
+        let values = try? directory.resourceValues(forKeys: [.creationDateKey])
+        return values?.creationDate ?? Date()
     }
 }
 
@@ -313,18 +388,7 @@ private enum NaiveCaptureStorage {
         for kind: NaiveCaptureKind,
         fileManager: FileManager = .default
     ) throws -> URL {
-        let root = try baseDirectory(fileManager: fileManager)
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [
-            .withInternetDateTime,
-            .withDashSeparatorInDate,
-            .withColonSeparatorInTime
-        ]
-        let timestamp = formatter.string(from: Date()).replacingOccurrences(of: ":", with: "-")
-        let directory = root.appendingPathComponent("\(kind.rawValue)-\(timestamp)", isDirectory: true)
-
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: false)
-        return directory
+        try ScanLibrary.createDraftDirectory(for: kind.scanKind, mode: .yolo, fileManager: fileManager)
     }
 
     static func writeCapture(
@@ -352,14 +416,6 @@ private enum NaiveCaptureStorage {
         }
         try metadataData.write(to: metadataURL, options: .atomic)
     }
-
-    private static func baseDirectory(fileManager: FileManager) throws -> URL {
-        let root = try fileManager
-            .url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-            .appendingPathComponent("NaiveCaptures", isDirectory: true)
-        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
-        return root
-    }
 }
 
 private struct NaiveCaptureMetadata: Encodable {
@@ -373,6 +429,7 @@ private enum NaiveCaptureError: LocalizedError {
     case missingCamera
     case cannotAddInput
     case cannotAddOutput
+    case noDraftToSave
 
     var errorDescription: String? {
         switch self {
@@ -382,6 +439,8 @@ private enum NaiveCaptureError: LocalizedError {
             return "The camera input could not be attached."
         case .cannotAddOutput:
             return "The photo output could not be attached."
+        case .noDraftToSave:
+            return "There is no captured draft to save yet."
         }
     }
 }

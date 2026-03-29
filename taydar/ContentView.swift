@@ -12,9 +12,10 @@ import RoomPlan
 struct ContentView: View {
     @State private var activeDestination: ScanDestination?
     @State private var showsScanChooser = false
+    @State private var showsPreviousScans = false
 
-    private let isRoomScanSupported = RoomCaptureSession.isSupported
-    private let isObjectScanSupported = ObjectCaptureSession.isSupported
+    private let isRoomScanSupported = ScanCapabilities.isRoomScanSupported
+    private let isObjectScanSupported = ScanCapabilities.isObjectScanSupported
 
     var body: some View {
         ZStack {
@@ -47,16 +48,10 @@ struct ContentView: View {
             Text("Choose the scan workflow to launch.")
         }
         .fullScreenCover(item: $activeDestination) { destination in
-            switch destination {
-            case .room:
-                RoomScanView()
-            case .object:
-                ObjectScanView()
-            case .naiveRoom:
-                NaiveCaptureView(scanKind: .room)
-            case .naiveObject:
-                NaiveCaptureView(scanKind: .object)
-            }
+            ScanDestinationView(destination: destination)
+        }
+        .sheet(isPresented: $showsPreviousScans) {
+            PreviousScansView()
         }
     }
 
@@ -105,6 +100,18 @@ struct ContentView: View {
                     .clipShape(Capsule())
             }
 
+            Button {
+                showsPreviousScans = true
+            } label: {
+                Text("View Previous Scans")
+                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 18)
+                    .background(.white.opacity(0.12))
+                    .clipShape(Capsule())
+            }
+
             Text(footerText)
                 .font(.system(size: 14, weight: .medium, design: .rounded))
                 .foregroundStyle(.white.opacity(0.72))
@@ -113,7 +120,7 @@ struct ContentView: View {
     }
 
     private var supportsAnyARScan: Bool {
-        isRoomScanSupported || isObjectScanSupported
+        ScanCapabilities.supportsAnyARScan
     }
 
     private var footerText: String {

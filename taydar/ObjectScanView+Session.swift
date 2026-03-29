@@ -90,7 +90,7 @@ extension ObjectScanView {
         case .finishing:
             return "Finishing"
         case .completed:
-            return "Close"
+            return "Review"
         case .failed:
             return "Start Over"
         case .initializing:
@@ -153,7 +153,10 @@ extension ObjectScanView {
                 session.requestImageCapture()
             }
         case .completed:
-            dismiss()
+            reviewDraft = makeReviewDraft()
+            if reviewDraft == nil {
+                reviewError = "Could not prepare the object capture for review."
+            }
         case .failed:
             Task {
                 await restartSession()
@@ -228,6 +231,8 @@ extension ObjectScanView {
     func restartSession() async {
         session?.cancel()
         setupError = nil
+        reviewError = nil
+        reviewDraft = nil
 
         let newSession = ObjectCaptureSession()
         if #available(iOS 18.0, *) {
@@ -246,26 +251,67 @@ extension ObjectScanView {
             setupError = "Could not create a scan folder: \(error.localizedDescription)"
         }
     }
+
+    func makeReviewDraft() -> ScanDraft? {
+        guard let scanDirectory else {
+            return nil
+        }
+
+        let contents = try? FileManager.default.contentsOfDirectory(
+            at: scanDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )
+        let imageURLs = (contents ?? [])
+            .filter { $0.pathExtension.lowercased() == "jpg" || $0.pathExtension.lowercased() == "jpeg" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+
+        guard !imageURLs.isEmpty else {
+            return nil
+        }
+
+        let values = try? scanDirectory.resourceValues(forKeys: [.creationDateKey])
+        return ScanDraft(
+            directory: scanDirectory,
+            kind: .object,
+            mode: .ar,
+            createdAt: values?.creationDate ?? Date(),
+            modelFileURL: nil,
+            imageFileURLs: imageURLs
+        )
+    }
+
+    func saveReviewDraft(named name: String) {
+        guard let reviewDraft else {
+            reviewError = "There is no object capture draft to save."
+            return
+        }
+
+        do {
+            _ = try ScanLibrary.saveDraft(reviewDraft, name: name)
+            dismiss()
+        } catch {
+            reviewError = error.localizedDescription
+        }
+    }
+
+    func discardReviewDraft() {
+        guard let reviewDraft else {
+            dismiss()
+            return
+        }
+
+        do {
+            try ScanLibrary.discardDraft(at: reviewDraft.directory)
+            dismiss()
+        } catch {
+            reviewError = error.localizedDescription
+        }
+    }
 }
 
 private enum ObjectScanStorage {
     static func makeScanDirectory(fileManager: FileManager = .default) throws -> URL {
-        let root = fileManager.temporaryDirectory.appendingPathComponent(
-            "ObjectScans",
-            isDirectory: true
-        )
-        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
-
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [
-            .withInternetDateTime,
-            .withDashSeparatorInDate,
-            .withColonSeparatorInTime
-        ]
-        let folderName = formatter.string(from: Date()).replacingOccurrences(of: ":", with: "-")
-        let directory = root.appendingPathComponent(folderName, isDirectory: true)
-
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: false)
-        return directory
+        try ScanLibrary.createDraftDirectory(for: .object, mode: .ar, fileManager: fileManager)
     }
 }

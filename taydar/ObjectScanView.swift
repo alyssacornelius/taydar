@@ -13,6 +13,8 @@ struct ObjectScanView: View {
     @State var session: ObjectCaptureSession?
     @State var scanDirectory: URL?
     @State var setupError: String?
+    @State var reviewDraft: ScanDraft?
+    @State var reviewError: String?
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -30,6 +32,17 @@ struct ObjectScanView: View {
             header
         }
         .preferredColorScheme(.dark)
+        .fullScreenCover(item: $reviewDraft) { draft in
+            ScanReviewView(
+                draft: draft,
+                saveAction: { name in
+                    saveReviewDraft(named: name)
+                },
+                cancelAction: {
+                    discardReviewDraft()
+                }
+            )
+        }
     }
 
     @ViewBuilder
@@ -121,6 +134,12 @@ struct ObjectScanView: View {
 
                 if let setupError {
                     Text(setupError)
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.red.opacity(0.92))
+                }
+
+                if let reviewError {
+                    Text(reviewError)
                         .font(.system(size: 13, weight: .semibold, design: .rounded))
                         .foregroundStyle(.red.opacity(0.92))
                 }

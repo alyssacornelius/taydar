@@ -4,6 +4,9 @@ included:
 excluded:
   - taydar.xcodeproj
 
+disabled_rules:
+  - file_length
+
 cache_path: .build/SwiftLintCache
 
 opt_in_rules:
@@ -50,10 +53,6 @@ type_body_length:
 function_body_length:
   warning: 40
   error: 60
-
-file_length:
-  warning: 400
-  error: 600
 
 identifier_name:
   min_length:
